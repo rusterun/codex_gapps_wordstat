@@ -41,10 +41,12 @@ setWordstatCredentials('ВАШ_API_KEY', 'ВАШ_FOLDER_ID');
 
 - базовый URL: `https://searchapi.api.cloud.yandex.net`
 - проверка подключения: `POST /v2/wordstat/getRegionsTree`
-- спрос по запросу: `POST /v2/wordstat/topRequests` с JSON `{ "folderId": "...", "phrase": "...", "numPhrases": 1 }`
+- спрос по запросу: `POST /v2/wordstat/dynamics` с JSON `{ "folderId": "...", "phrase": "...", "period": "PERIOD_WEEKLY", "fromDate": "...", "toDate": "...", "regions": [], "devices": ["DEVICE_ALL"] }`
 - авторизация: HTTP-заголовок `Authorization: Api-Key <API key>`
 
-`folderId` обязателен и добавляется в тело каждого запроса автоматически.
+`folderId` обязателен и добавляется в тело каждого запроса автоматически. Для значения в колонке `Спрос` скрипт суммирует `count` из массива `results`. Период агрегации по умолчанию — `PERIOD_WEEKLY`: `fromDate` автоматически выравнивается на понедельник, а `toDate` — на воскресенье последней завершённой недели. Если переключить код обратно на `PERIOD_MONTHLY`, даты также выравниваются под требования API: `fromDate` — первое число месяца, `toDate` — последний день месяца. Устройства — `DEVICE_ALL`, регионы не ограничиваются.
+
+Чтобы не превышать лимит времени Apps Script, за один запуск отправляется не больше 40 новых запросов. Остальные запросы можно обработать повторным запуском меню **Обновить спрос**; уже полученные значения будут взяты из кэша.
 
 Кэш хранится в `PropertiesService` и действует 7 дней.
 
