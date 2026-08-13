@@ -16,13 +16,18 @@ var WORDSTAT_HEADERS = {
 
 var WORDSTAT_CONFIG = {
   API_BASE_URL: 'https://searchapi.api.cloud.yandex.net',
-  TOP_REQUESTS_PATH: '/v2/wordstat/topRequests',
+  DYNAMICS_PATH: '/v2/wordstat/dynamics',
   HEALTHCHECK_PATH: '/v2/wordstat/getRegionsTree',
   API_KEY_PROPERTY: 'YANDEX_CLOUD_API_KEY',
   FOLDER_ID_PROPERTY: 'YANDEX_CLOUD_FOLDER_ID',
   CACHE_PROPERTY: 'WORDSTAT_DEMAND_CACHE_V2',
   CACHE_TTL_HOURS: 24 * 7,
   REQUEST_SLEEP_MS: 150,
+  MAX_REQUESTS_PER_RUN: 40,
+  DEFAULT_PERIOD: 'PERIOD_MONTHLY',
+  LOOKBACK_DAYS: 31,
+  DEFAULT_REGIONS: [],
+  DEFAULT_DEVICES: ['DEVICE_ALL'],
   MAX_CACHE_ENTRIES: 1000,
 };
 
@@ -115,7 +120,9 @@ function updateWordstatDemand_(forceRefresh) {
   var cache = loadCache_();
   var results = {};
   var now = new Date();
-  var stats = { processed: 0, fromCache: 0, requested: 0, errors: 0 };
+  var stats = { processed: 0, fromCache: 0, requested: 0, errors: 0, skippedByLimit: 0 };
+  var errorSamples = [];
+  var requestsSent = 0;
 
   uniqueQueries.forEach(function(query) {
     var cached = cache[query];
@@ -125,14 +132,22 @@ function updateWordstatDemand_(forceRefresh) {
       return;
     }
 
+    if (requestsSent >= WORDSTAT_CONFIG.MAX_REQUESTS_PER_RUN) {
+      stats.skippedByLimit++;
+      return;
+    }
+
     var response = fetchDemandForQuery_(query, credentials);
+    requestsSent++;
     stats.requested++;
     if (response.ok) {
       results[query] = { ok: true, count: response.count };
       cache[query] = { count: response.count, fetchedAt: now.toISOString() };
     } else {
-      results[query] = { ok: false, error: response.error };
+      var errorText = sanitizeError_(response.error);
+      results[query] = { ok: false, error: errorText };
       stats.errors++;
+      if (errorSamples.length < 5) errorSamples.push(query + ': ' + errorText);
     }
     Utilities.sleep(WORDSTAT_CONFIG.REQUEST_SLEEP_MS);
   });
@@ -151,15 +166,41 @@ function updateWordstatDemand_(forceRefresh) {
   demandRange.setValues(demandValues);
   dateRange.setValues(dateValues);
   saveCache_(cache);
-  showAlert_(['Обработано: ' + stats.processed, 'Из кэша: ' + stats.fromCache, 'Запрошено у Wordstat: ' + stats.requested, 'Ошибок: ' + stats.errors].join('\n'));
+  var message = [
+    'Обработано: ' + stats.processed,
+    'Из кэша: ' + stats.fromCache,
+    'Запрошено у Wordstat: ' + stats.requested,
+    'Отложено из-за лимита запуска: ' + stats.skippedByLimit,
+    'Ошибок: ' + stats.errors
+  ];
+  if (errorSamples.length) {
+    message.push('');
+    message.push('Примеры ошибок:');
+    message = message.concat(errorSamples);
+  }
+  showAlert_(message.join('\n'));
 }
 
 function fetchDemandForQuery_(query, credentials) {
-  var response = fetchWordstat_(WORDSTAT_CONFIG.TOP_REQUESTS_PATH, { phrase: query, numPhrases: 1 }, credentials);
+  var dateRange = getDynamicsDateRange_();
+  var response = fetchWordstat_(WORDSTAT_CONFIG.DYNAMICS_PATH, {
+    phrase: query,
+    period: WORDSTAT_CONFIG.DEFAULT_PERIOD,
+    fromDate: dateRange.fromDate,
+    toDate: dateRange.toDate,
+    regions: WORDSTAT_CONFIG.DEFAULT_REGIONS,
+    devices: WORDSTAT_CONFIG.DEFAULT_DEVICES,
+  }, credentials);
   if (!response.ok) return response;
-  var total = response.data && (response.data.totalCount || response.data.total_count);
-  if (typeof total === 'number') return { ok: true, count: total };
-  return { ok: false, error: 'В ответе Wordstat нет поля totalCount для запроса: ' + query };
+
+  var results = response.data && response.data.results;
+  if (!Array.isArray(results)) return { ok: false, error: 'В ответе Wordstat нет массива results для запроса: ' + query };
+
+  var total = results.reduce(function(sum, item) {
+    var count = Number(item && item.count);
+    return sum + (isNaN(count) ? 0 : count);
+  }, 0);
+  return { ok: true, count: total };
 }
 
 function fetchWordstat_(path, payload, credentials) {
@@ -210,6 +251,12 @@ function buildQueryFromProductName_(name) {
 
 function normalizeQuery_(query) {
   return String(query || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function getDynamicsDateRange_() {
+  var to = new Date();
+  var from = new Date(to.getTime() - WORDSTAT_CONFIG.LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  return { fromDate: from.toISOString(), toDate: to.toISOString() };
 }
 
 function getCredentials_() {
